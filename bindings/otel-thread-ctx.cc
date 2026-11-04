@@ -938,6 +938,9 @@ void GetStoredAlsHash(const FunctionCallbackInfo<Value>& args) {
 // against the V8 headers we are compiled with, so a build not matching
 // the schema will fail to compile.
 //
+// Pointer-compressed builds can't match the schema, so they skip these
+// assertions and the writer declines to publish instead.
+//
 // Each value the reader needs equals one of V8's public constants:
 //   tagged size (8)            kApiTaggedSize
 //   JSMap table offset (0x18)  kJSObjectHeaderSize, because JSCollection
@@ -946,12 +949,14 @@ void GetStoredAlsHash(const FunctionCallbackInfo<Value>& args) {
 //   OrderedHashMap header      kFixedArrayHeaderSize, because
 //   size (0x10)                OrderedHashTable derives from FixedArray
 //                              (deps/v8/src/objects/ordered-hash-table.h)
+#ifndef V8_COMPRESS_POINTERS
 static_assert(v8::internal::kApiTaggedSize == 8,
               "nodejs_v1 assumes a V8 built without pointer compression");
 static_assert(v8::internal::Internals::kJSObjectHeaderSize == 0x18,
               "unexpected V8 JSObject header size");
 static_assert(v8::internal::Internals::kFixedArrayHeaderSize == 0x10,
               "unexpected V8 FixedArray header size");
+#endif
 #if NODE_MAJOR_VERSION >= 22
 // Node < 22 lacks this constant; the contract is unusable there anyway,
 // as it has no ContinuationPreservedEmbedderData either (see StoreAls).
@@ -1001,6 +1006,14 @@ void OtelThreadCtx::Init(Local<Object> exports) {
             v8::String::NewFromUtf8Literal(
                 isolate, "otelThreadCtxRecordSlotOffsetHolds"),
             v8::Boolean::New(isolate, RecordSlotOffsetHolds(isolate, context)))
+      .FromJust();
+  const bool layout_matches_schema =
+      !v8::internal::PointerCompressionIsEnabled();
+  exports
+      ->Set(context,
+            v8::String::NewFromUtf8Literal(
+                isolate, "otelThreadCtxV8LayoutMatchesSchema"),
+            v8::Boolean::New(isolate, layout_matches_schema))
       .FromJust();
 }
 

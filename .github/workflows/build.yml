@@ -34,6 +34,15 @@ jobs:
       - run: npm install
       - run: npm run test:js-valgrind
 
+  pointer-compression:
+    runs-on: ubuntu-latest
+    container: platformatic/node-caged:26
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update && apt-get install -y python3 build-essential
+      - run: npm install
+      - run: npm test
+
   build:
     uses: Datadog/action-prebuildify/.github/workflows/build.yml@main
     with:

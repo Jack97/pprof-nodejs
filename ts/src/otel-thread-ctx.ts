@@ -139,6 +139,7 @@ interface Addon {
   otelThreadCtxStoreAls(als: AsyncLocalStorage<ThreadContext>): void;
   otelThreadCtxGetStoredAlsHash(): number;
   otelThreadCtxRecordSlotOffsetHolds: boolean;
+  otelThreadCtxV8LayoutMatchesSchema: boolean;
 }
 
 const SCHEMA_VERSION = 'nodejs_v1_dev';
@@ -175,6 +176,9 @@ if (process.platform === 'linux') {
   whyUnpublishable = () => {
     if (!isAsyncContextFrameActive()) {
       return `async_context_frame support is unavailable: ${asyncContextFrameHint()}`;
+    }
+    if (!addon.otelThreadCtxV8LayoutMatchesSchema) {
+      return 'V8 is built with pointer compression, which the schema does not cover';
     }
     if (!addon.otelThreadCtxRecordSlotOffsetHolds) {
       return 'V8 does not place internal fields where the addon was built to expect them';

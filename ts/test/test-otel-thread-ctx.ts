@@ -81,6 +81,25 @@ const isLinux = process.platform === 'linux';
 // Asks the same question the source side asks, the same way.
 const isAsyncContextFrameAvailable = isAsyncContextFrameActive();
 
+interface LayoutAddon {
+  otelThreadCtxV8LayoutMatchesSchema: boolean;
+}
+
+function isV8LayoutMatchingSchema(): boolean {
+  if (!isLinux) {
+    return true;
+  }
+  const addon: LayoutAddon = require('node-gyp-build')(
+    join(__dirname, '..', '..'),
+  );
+  return addon.otelThreadCtxV8LayoutMatchesSchema;
+}
+
+const layoutMatchesSchema = isV8LayoutMatchingSchema();
+const canUseWriter = isLinux && isAsyncContextFrameAvailable;
+const canPublish = canUseWriter && layoutMatchesSchema;
+const isPointerCompressed = canUseWriter && !layoutMatchesSchema;
+
 // Returns a plain Uint8Array (not a Buffer) so assert.deepStrictEqual against
 // other Uint8Arrays — including the one the addon returns — succeeds.
 function bytesFromHex(hex: string): Uint8Array {
@@ -152,7 +171,21 @@ function captureBytes(opts: {
   return bytes as Uint8Array;
 }
 
-(isLinux && isAsyncContextFrameAvailable ? describe : describe.skip)(
+(isPointerCompressed ? describe : describe.skip)(
+  'OTEP-4947 thread context under pointer compression',
+  () => {
+    it('declines to publish', () => {
+      const context = new ThreadContext(TRACE_ID_BYTES, SPAN_ID_BYTES);
+      strictAssert.throws(() => context.enter(), /pointer compression/);
+      strictAssert.throws(
+        () => getProcessContextAttributes([]),
+        /pointer compression/,
+      );
+    });
+  },
+);
+
+(canPublish ? describe : describe.skip)(
   'OTEP-4947 thread context (Linux-only)',
   () => {
     describe('isolate teardown', () => {

@@ -28,6 +28,8 @@
 // We only ever read AsyncContextFrame maps (the CPED map), which are ordinary
 // JS Maps, so we only handle the OrderedHashMap layout here.
 
+#include <v8-internal.h>
+
 #include <cstdint>
 
 namespace dd {
@@ -58,6 +60,25 @@ inline Address UntagPointer(Address tagged) {
 // only ones we support.
 static_assert(sizeof(void*) == 8, "Only 64-bit platforms supported");
 
+#ifdef V8_COMPRESS_POINTERS
+// A tagged slot holds a 32-bit offset into the isolate's pointer cage, and a
+// Smi is a 31-bit integer shifted left by one.
+using Tagged = uint32_t;
+
+inline bool IsSmi(Tagged value) {
+  return (value & v8::internal::kSmiTagMask) == v8::internal::kSmiTag;
+}
+
+inline int SmiToInt(Tagged smi) {
+  return v8::internal::Internals::SmiValue(smi);
+}
+
+inline Address Decompress(Address holder, Tagged value) {
+  return v8::internal::Internals::DecompressTaggedField(holder, value);
+}
+#else
+using Tagged = Address;
+
 inline bool IsSmi(Address value) {
   // More rigorous than (value & 1) but valid on 64-bit platforms only.
   return (value & 0xFFFFFFFF) == 0;
@@ -67,6 +88,15 @@ inline int SmiToInt(Address smi) {
   return static_cast<int>(static_cast<intptr_t>(smi) >> 32);
 }
 
+inline Address Decompress([[maybe_unused]] Address holder, Tagged value) {
+  return value;
+}
+#endif
+
+inline Tagged Compress(Address value) {
+  return static_cast<Tagged>(value);
+}
+
 // ============================================================================
 // V8 Hashtable Structure Definitions
 // ============================================================================
@@ -74,23 +104,28 @@ inline int SmiToInt(Address smi) {
 // HeapObject layout - base for all V8 heap objects
 // From v8/src/objects/heap-object.h
 struct HeapObjectLayout {
-  Address classMap_;  // Tagged pointer to the class map
+  Tagged classMap_;  // Tagged pointer to the class map
 };
 
 // JavaScript Map object
 struct JSMapLayout {
-  HeapObjectLayout header_;     // Map is a HeapObject
-  Address properties_or_hash_;  // not used by us
-  Address elements_;            // not used by us
+  HeapObjectLayout header_;    // Map is a HeapObject
+  Tagged properties_or_hash_;  // not used by us
+  Tagged elements_;            // not used by us
   // Tagged pointer to an OrderedHashMapLayout
-  Address table_;
+  Tagged table_;
+
+  Address table() const {
+    Address self = reinterpret_cast<Address>(this);
+    return Decompress(self, table_);
+  }
 };
 
 // V8 FixedArray: length_ is a Smi, followed by that many element slots
 struct FixedArrayLayout {
   HeapObjectLayout header_;  // FixedArray is a HeapObject
-  Address length_;
-  Address elements_[0];
+  Tagged length_;
+  Tagged elements_[0];
 };
 
 // OrderedHashMap layout
@@ -99,9 +134,9 @@ struct OrderedHashMapLayout {
   FixedArrayLayout fixedArray_;  // OrderedHashMap is a FixedArray
   // The first 3 address slots in the FixedArray that is a Hashtable are the
   // number of elements, deleted elements, and buckets. Each one is a Smi.
-  Address number_of_elements_;
-  Address number_of_deleted_elements_;
-  Address number_of_buckets_;
+  Tagged number_of_elements_;
+  Tagged number_of_deleted_elements_;
+  Tagged number_of_buckets_;
   // First number_of_buckets_ entries in head_and_data_table_ is the head table:
   // each entry is an index of the first entry (head of the linked list of
   // entries) in the data table for that bucket. This is followed by the data
@@ -114,7 +149,7 @@ struct OrderedHashMapLayout {
   // expressed in number of entries from the start of the data table, so to
   // convert it into a head_and_data_table_ you need to add number_of_buckets_
   // (length of the head table) and then 3 * index.
-  Address head_and_data_table_[0];  // Variable: [head_table][data_table]
+  Tagged head_and_data_table_[0];  // Variable: [head_table][data_table]
 
   // Constants for entry structure
   static constexpr int kEntrySize = 3;
@@ -133,7 +168,7 @@ struct OrderedHashMapLayout {
 
   // Get first entry index for a bucket
   int GetFirstEntry(int bucket) const {
-    Address entry_smi = head_and_data_table_[bucket];
+    Tagged entry_smi = head_and_data_table_[bucket];
     return IsSmi(entry_smi) ? SmiToInt(entry_smi) : kNotFound;
   }
 
@@ -143,7 +178,7 @@ struct OrderedHashMapLayout {
   }
 
   // Get key at entry index
-  Address GetKey(int entry) const {
+  Tagged GetKey(int entry) const {
     int index = EntryToIndex(entry);
     return head_and_data_table_[index + kKeyOffset];
   }
@@ -151,13 +186,15 @@ struct OrderedHashMapLayout {
   // Get value at entry index
   Address GetValue(int entry) const {
     int index = EntryToIndex(entry);
-    return head_and_data_table_[index + kValueOffset];
+    Tagged value = head_and_data_table_[index + kValueOffset];
+    Address self = reinterpret_cast<Address>(this);
+    return Decompress(self, value);
   }
 
   // Get next entry in chain
   int GetNextChainEntry(int entry) const {
     int index = EntryToIndex(entry);
-    Address chain_smi = head_and_data_table_[index + kChainOffset];
+    Tagged chain_smi = head_and_data_table_[index + kChainOffset];
     return IsSmi(chain_smi) ? SmiToInt(chain_smi) : kNotFound;
   }
 };
@@ -170,6 +207,7 @@ struct OrderedHashMapLayout {
 int FindEntryByHash(const OrderedHashMapLayout* layout,
                     int hash,
                     Address key_to_find) {
+  const Tagged key = Compress(key_to_find);
   const int entry_count = layout->GetEntryCount();
   const int bucket = hash & (layout->NumberOfBuckets() - 1);
   int entry = layout->GetFirstEntry(bucket);
@@ -182,8 +220,8 @@ int FindEntryByHash(const OrderedHashMapLayout* layout,
        entry != OrderedHashMapLayout::kNotFoundValue && entry >= 0 &&
        entry < entry_count && max_entries_left > 0;
        max_entries_left--) {
-    Address key_at_entry = layout->GetKey(entry);
-    if (key_at_entry == key_to_find) {
+    Tagged key_at_entry = layout->GetKey(entry);
+    if (key_at_entry == key) {
       return entry;
     }
     entry = layout->GetNextChainEntry(entry);
@@ -248,7 +286,8 @@ static bool IsOrderedHashMap(Address table_untagged) {
 Address GetValueFromMap(Address map_addr, int hash, Address key) {
   const JSMapLayout* map_untagged =
       reinterpret_cast<const JSMapLayout*>(UntagPointer(map_addr));
-  Address table_untagged = UntagPointer(map_untagged->table_);
+  Address table = map_untagged->table();
+  Address table_untagged = UntagPointer(table);
 
   if (IsOrderedHashMap(table_untagged)) {
     const OrderedHashMapLayout* layout =
